@@ -44,11 +44,11 @@ def GetDateTimeFromISO8601String(s):
     return dateutil.parser.parse(s)
 
 def WriteLastGenerationDate():
-    with open('LastClassListGenerationDate.txt', 'w') as file:
+    with open(os.path.dirname(os.path.abspath(__file__)) + '\LastClassListGenerationDate.txt', 'w') as file:
         file.write(endDate)
 
 def ReadLastGenerationDate():
-    with open('LastClassListGenerationDate.txt') as file:
+    with open(os.path.dirname(os.path.abspath(__file__)) + '\LastClassListGenerationDate.txt') as file:
         lastEndDate = GetDateTimeFromISO8601String(file.readlines()[0])
     startDate = lastEndDate + datetime.timedelta(microseconds=1)
 
@@ -149,12 +149,12 @@ def ExportIndividualOrders(allOrdersList):
                         print('Order ' + str(orderCount) + ' Completed.')
                         orderCount += 1
                     else:
-                        if os.path.isfile('ProductFormErrors.txt'):
-                            with open('ProductFormErrors.txt', 'r') as file:
+                        if os.path.isfile(os.path.dirname(os.path.abspath(__file__)) + '\ProductFormErrors.txt'):
+                            with open(os.path.dirname(os.path.abspath(__file__)) + '\ProductFormErrors.txt', 'r') as file:
                                 if response.json()['lineItems'][0]['productName'] + '\n' not in file.readlines():
                                     writeToProductFormErrorsFile = True
                         else:
-                            with open('ProductFormErrors.txt', 'w') as file:
+                            with open(os.path.dirname(os.path.abspath(__file__)) + '\ProductFormErrors.txt', 'w') as file:
                                 file.write(response.json()['lineItems'][0]['productName'] + '\n')
             else:
                 if 'Tech Club' in response.json()['lineItems'][0]['productName'].split('- ')[1]:
@@ -184,16 +184,16 @@ def ExportIndividualOrders(allOrdersList):
                     print('Order ' + str(orderCount) + ' Completed.')
                     orderCount += 1
                 else:
-                    if os.path.isfile('ProductFormErrors.txt'):
-                        with open('ProductFormErrors.txt', 'r') as file:
+                    if os.path.isfile(os.path.dirname(os.path.abspath(__file__)) + '\ProductFormErrors.txt'):
+                        with open(os.path.dirname(os.path.abspath(__file__)) + '\ProductFormErrors.txt', 'r') as file:
                             if response.json()['lineItems'][0]['productName'] + '\n' not in file.readlines():
                                 writeToProductFormErrorsFile = True
                     else:
-                        with open('ProductFormErrors.txt', 'w') as file:
+                        with open(os.path.dirname(os.path.abspath(__file__)) + '\ProductFormErrors.txt', 'w') as file:
                             file.write(response.json()['lineItems'][0]['productName'] + '\n')
 
             if writeToProductFormErrorsFile:
-                with open('ProductFormErrors.txt', 'a') as file:
+                with open(os.path.dirname(os.path.abspath(__file__)) + '\ProductFormErrors.txt', 'a') as file:
                     file.write(response.json()['lineItems'][0]['productName'] + '\n')
 
     return responseList, classTypeList, fullYearList, abortClassListGeneration
@@ -399,7 +399,7 @@ def GoogleDriveAccess():
         gauth.Refresh()
     else:
         gauth.Authorize()
-    gauth.SaveCredentialsFile("credentials.txt")
+    gauth.SaveCredentialsFile(os.path.dirname(os.path.abspath(__file__))+ "credentials.txt")
 
     return GoogleDrive(gauth)
 
@@ -492,7 +492,7 @@ def CreateAndAppendClassLists(orderList, classListName):
 
     print('Sorting Class Lists')
 
-    for fileName in os.listdir("."):
+    for fileName in os.listdir(os.path.dirname(os.path.abspath(__file__))):
         if classListName in fileName:
             if '.xlsx' not in fileName:
                 os.rename(fileName, fileName + '.xlsx')
@@ -761,7 +761,7 @@ def SendErrorEmails():
     # Add body to email
     message.attach(MIMEText(body, "plain"))
 
-    filename = "ProductFormErrors.txt"  # In same directory as script
+    filename = os.path.dirname(os.path.abspath(__file__)) + "\ProductFormErrors.txt"  # In same directory as script
 
     # Open PDF file in binary mode
     with open(filename, "rb") as attachment:

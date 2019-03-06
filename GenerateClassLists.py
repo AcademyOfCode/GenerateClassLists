@@ -7,10 +7,12 @@ import argparse
 import pandas as pd
 import openpyxl
 from openpyxl import load_workbook
-from openpyxl.styles import Font
+from openpyxl.styles import Font, Color, fills
 from openpyxl.utils import get_column_letter
 from pydrive.auth import GoogleAuth
 from pydrive.drive import GoogleDrive
+from datetime import datetime
+from datetime import timedelta
 
 parser = argparse.ArgumentParser()
 parser.add_argument('apiKey')
@@ -20,61 +22,129 @@ args = parser.parse_args()
 apiKey = args.apiKey
 apiURL = 'https://api.squarespace.com/1.0/commerce/orders'
 
-startDate = '2019-02-07T11:20:00.000000Z'
-endDate = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+productNameIgnoreList = ['Second Instalment', 'Spring 2019', '2019 - Beaumont Coding Classes', 'Stratford', 'Muslim National School', 'Custom payment amount']
 
-testMode = bool(args.testMode)
+def StringToBoolean(s):
+    if s == 'True':
+         return True
+    elif s == 'False':
+         return False
 
 def GetDateTimeFromISO8601String(s):
     return dateutil.parser.parse(s)
 
-def WriteLastGenerationDate():
+def WriteLastGenerationDate(endDate):
     with open(os.path.dirname(os.path.abspath(__file__)) + '\LastClassListGenerationDate.txt', 'w') as file:
         file.write(endDate)
 
 def ReadLastGenerationDate():
     with open(os.path.dirname(os.path.abspath(__file__)) + '\LastClassListGenerationDate.txt') as file:
         lastEndDate = GetDateTimeFromISO8601String(file.readlines()[0])
-    startDate = lastEndDate + datetime.timedelta(microseconds=1)
+    startDate = lastEndDate + timedelta(microseconds=1)
 
-def ExportAllOrders(startDate, endDate):
+    return startDate.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+def ExportAllOrders():
+    maxRetries = 10
+    sleepTime = 1
     pageNumber = 1
-    nextPageCursor = ""
+    orderList = []
     responsePageList = []
+
+    startDate = ReadLastGenerationDate()
+    endDate = datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
     headers = {
         'Authorization': 'Bearer ' + apiKey,
     }
 
-    params = (
+    params = [
         ('modifiedAfter', startDate),
         ('modifiedBefore', endDate)
-    )
+    ]
 
-    response = requests.get(apiURL, headers=headers, params=params)
+    for i in range(maxRetries):
+        response = requests.get(apiURL, headers=headers, params=params)
+
+        if response.status_code == 200:
+            responseJSON = response.json()
+            break
+        elif response.status_code == 429:
+            print('Retrying...')
+            time.sleep(sleepTime)
+            sleepTime += 0.5
+        else:
+            print('Error getting request (Status Code: ' + str(response.status_code) + ')')
+            print('Exiting program.')
+            exit(-1)
+
+    if response.status_code != 200:
+        print('Error getting request (Status Code: ' + str(response.status_code) + ')')
+        print('Exiting program.')
+        exit(-1)
+
+    for index in range(len(responseJSON['result'])):
+        skipOrder = False
+        for productName in productNameIgnoreList:
+            if productName in responseJSON['result'][index]['lineItems'][0]['productName']:
+                skipOrder = True
+                break
+        if not skipOrder:
+            orderList.append(responseJSON['result'][index])
+
     print('Page ' + str(pageNumber) + ' Request Completed.')
-    responsePageList.append(response)
-    responseTextLines = response.text.split('\n')
 
-    while 'true' in responseTextLines[len(responseTextLines)-3]:
+    if orderList:
+        responsePageList.append(orderList)
+
+    while responseJSON['pagination']['hasNextPage'] == True:
         pageNumber += 1
 
-        for line in responseTextLines:
-            if 'nextPageCursor' in line:
-                nextPageCursor = line.split(':')[1].replace('"', '').replace(',', '').replace(' ', '')
+        orderList = []
 
-        params = (
-            ('cursor', nextPageCursor),
-        )
+        params = [
+            ('cursor', responseJSON['pagination']['nextPageCursor'])
+        ]
 
-        response = requests.get(apiURL, headers=headers, params=params)
-        responseTextLines = response.text.split('\n')
+        for i in range(maxRetries):
+            response = requests.get(apiURL, headers=headers, params=params)
+
+            if response.status_code == 200:
+                responseJSON = response.json()
+                break
+            elif response.status_code == 429:
+                print('Retrying...')
+                time.sleep(sleepTime)
+                sleepTime += 0.5
+            else:
+                print('Error getting request (Status Code: ' + str(response.status_code) + ')')
+                print('Exiting program.')
+                exit(-1)
+
+        if response.status_code != 200:
+            print('Error getting request (Status Code: ' + str(response.status_code) + ')')
+            print('Exiting program.')
+            exit(-1)
+
+        for index in range(len(responseJSON['result'])):
+            skipOrder = False
+            for productName in productNameIgnoreList:
+                if productName in responseJSON['result'][index]['lineItems'][0]['productName']:
+                    skipOrder = True
+                    break
+            if not skipOrder:
+                orderList.append(responseJSON['result'][index])
+
         print('Page ' + str(pageNumber) + ' Request Completed.')
-        responsePageList.append(response)
 
-    return responsePageList
+        if orderList:
+            responsePageList.append(orderList)
 
-def ExportIndividualOrders(allOrdersList):
+    return responsePageList, endDate
+
+def ExportIndividualOrders(allOrdersList, testMode):
+    maxRetries = 10
+    sleepTime = 1
     orderCount = 1
     responseList = []
     classTypeList = []
@@ -85,58 +155,70 @@ def ExportIndividualOrders(allOrdersList):
         'User-Agent' : 	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/71.0.3578.98 Safari/537.36'
     }
 
-    print('Exporting Individual Order...')
+    print('Exporting Individual Orders...')
     for orderList in allOrdersList:
+        for order in orderList:
+            orderID = order['id']
 
-        lineNumber = 0
-        lineNumberList = []
+            for i in range(maxRetries):
+                response = requests.get(apiURL + '/' + orderID, headers=headers)
 
-        for line in orderList.text.split('\n'):
-            if 'orderNumber' in line:
-                lineNumberList.append(lineNumber)
-            lineNumber += 1
+                if response.status_code == 200:
+                    responseJSON = response.json()
+                    break
+                elif response.status_code == 429:
+                    print('Retrying...')
+                    time.sleep(sleepTime)
+                    sleepTime += 0.5
+                else:
+                    print('Error getting request (Status Code: ' + str(response.status_code) + ')')
+                    print('Exiting program.')
+                    exit(-1)
 
-        for lineNum in lineNumberList:
-            orderID = orderList.text.split('\n')[lineNum-1].split(':')[1].replace(' ','').replace('"','').replace(',','')
-            response = requests.get(apiURL + '/' + orderID, headers=headers)
+            if response.status_code != 200:
+                print('Error getting request (Status Code: ' + str(response.status_code) + ')')
+                print('Exiting program.')
+                exit(-1)
 
-            if 'Custom payment amount' in response.json()['lineItems'][0]['productName']:
-                continue
-
-            if 'Test' in response.json()['lineItems'][0]['customizations'][0]['value']:
+            if 'Test' in responseJSON['lineItems'][0]['customizations'][0]['value']:
                 if testMode:
-                    if 'Tech Club' in response.json()['lineItems'][0]['productName'].split('- ')[1]:
-                        classType = (response.json()['lineItems'][0]['productName'].split()[0],response.json()['lineItems'][0]['productName'].split()[1], 'Tech Club')
+                    if 'Tech Club' in responseJSON['lineItems'][0]['productName'].split('- ')[1]:
+                        classType = (responseJSON['lineItems'][0]['productName'].split()[0],responseJSON['lineItems'][0]['productName'].split()[1], 'Tech Club')
                     else:
-                        classType = (response.json()['lineItems'][0]['productName'].split()[0],response.json()['lineItems'][0]['productName'].split()[1])
+                        classType = (responseJSON['lineItems'][0]['productName'].split()[0],responseJSON['lineItems'][0]['productName'].split()[1])
 
-                    if '30 Weeks' in response.json()['lineItems'][0]['variantOptions'][1]['value']:
-                        classType = ('Spring', str(int(response.json()['lineItems'][0]['productName'].split()[1]) + 1), 'Next Term')
-                        fullYearList.append(response.json())
+                    for variantOption in responseJSON['lineItems'][0]['variantOptions']:
+                        if 'Payment Plan' in variantOption['optionName']:
+                            if '30 Weeks' in variantOption['value']:
+                                classType = ('Spring', str(int(responseJSON['lineItems'][0]['productName'].split()[1]) + 1), 'Next Term')
+                                fullYearList.append(responseJSON)
+                                break
 
                     if classType not in classTypeList:
                         classTypeList.append(classType)
 
-                    responseList.append(response.json())
+                    responseList.append(responseJSON)
                     print('Order ' + str(orderCount) + ' Completed.')
                     orderCount += 1
-
             else:
-                if 'Tech Club' in response.json()['lineItems'][0]['productName'].split('- ')[1]:
-                    classType = (response.json()['lineItems'][0]['productName'].split()[0],
-                                 response.json()['lineItems'][0]['productName'].split()[1], 'Tech Club')
+                if 'Tech Club' in responseJSON['lineItems'][0]['productName'].split('- ')[1]:
+                    classType = (responseJSON['lineItems'][0]['productName'].split()[0],
+                                 responseJSON['lineItems'][0]['productName'].split()[1], 'Tech Club')
                 else:
-                    classType = (response.json()['lineItems'][0]['productName'].split()[0],
-                                 response.json()['lineItems'][0]['productName'].split()[1])
+                    classType = (responseJSON['lineItems'][0]['productName'].split()[0],
+                                 responseJSON['lineItems'][0]['productName'].split()[1])
 
-                if '30 Weeks' in response.json()['lineItems'][0]['variantOptions'][1]['value']:
-                    classType = ('Spring', str(int(response.json()['lineItems'][0]['productName'].split()[1]) + 1), 'Next Term')
-                    fullYearList.append(response.json())
+                for variantOption in responseJSON['lineItems'][0]['variantOptions']:
+                    if 'Payment Plan' in variantOption['optionName']:
+                        if '30 Weeks' in variantOption['value']:
+                            classType = ('Spring', str(int(responseJSON['lineItems'][0]['productName'].split()[1]) + 1), 'Next Term')
+                            fullYearList.append(responseJSON)
+                            break
 
                 if classType not in classTypeList:
                     classTypeList.append(classType)
 
-                responseList.append(response.json())
+                responseList.append(responseJSON)
                 print('Order ' + str(orderCount) + ' Completed.')
                 orderCount += 1
 
@@ -154,7 +236,7 @@ def GoogleDriveAccess():
         gauth.Refresh()
     else:
         gauth.Authorize()
-    gauth.SaveCredentialsFile(os.path.dirname(os.path.abspath(__file__))+ "credentials.txt")
+    gauth.SaveCredentialsFile(os.path.dirname(os.path.abspath(__file__)) + "credentials.txt")
 
     return GoogleDrive(gauth)
 
@@ -216,35 +298,6 @@ def AppendDfToExcel(fileName, df, sheetName, book, startRow=None, truncateSheet=
     writer.save()
 
 def CreateAndAppendClassLists(orderList, classListName):
-    dataGapSize = 27
-
-    if 'Autumn' in classListName:
-        numClasses = 12
-    elif 'Spring' in classListName:
-        numClasses = 18
-    else:
-        numClasses = 5
-
-    summaryTemplateLines = [['Venue','No. of Students']
-                            ]
-
-    classListTemplateLines = [['Date'],
-                             ['Student Name'],
-                             ['Class ' + str(classNum + 1) for classNum in range(numClasses)],
-                             [' ' for gap in range(dataGapSize - 1)],
-                             ['Gender', 'Order ID', 'Email', 'Billing Name', 'Phone', 'Student Name(s)',
-                              'Student Date(s) of Birth',
-                              'Student\'s School and Class', 'Are you a returning Academy of Code student?',
-                              'If you are a returning student, when was your last term with AoC?',
-                              'Additional support for your child', 'Photography Consent', 'Other Details',
-                              'Other Teacher Notes']
-                            ]
-
-    classListTemplateLines[1] = classListTemplateLines[1] + classListTemplateLines[2] + classListTemplateLines[3] + classListTemplateLines[4]
-
-    for i in range(3):
-        del classListTemplateLines[2]
-
     print('Sorting Class Lists')
 
     for fileName in os.listdir(os.path.dirname(os.path.abspath(__file__))):
@@ -279,20 +332,14 @@ def CreateAndAppendClassLists(orderList, classListName):
             writer.book = book
 
             if 'Summary' not in book.sheetnames:
-                summaryTemplateDataFrame = pd.DataFrame(data=summaryTemplateLines)
-                summaryTemplateDataFrame.to_excel(writer, sheet_name='Summary', header=False, index=False)
-
-                sheet = book['Summary']
-                cell = sheet['A1']
-                cell.font = Font(bold=True)
-                cell = sheet['B1']
-                cell.font = Font(bold=True)
-
-                writer.save()
+                book.create_sheet("Summary")
+                book.save(fileName)
 
             if 'Sheet' in book.sheetnames:
                 sheet = book.get_sheet_by_name('Sheet')
                 book.remove_sheet(sheet)
+
+            classDates = []
 
             for order in seperatedNameOrderList:
                 if order['orderNumber'] == prevOrderID:
@@ -309,6 +356,76 @@ def CreateAndAppendClassLists(orderList, classListName):
 
                 prevOrderID = order['orderNumber']
 
+                time = order['lineItems'][0]['variantOptions'][0]['value'].split(',')[1].replace(' ', '')[0:5].replace(':', '')
+
+                if 'Tech Club' in fileName:
+                    venue = order['lineItems'][0]['productName'].split('- ')[2].split(',')[0].split()[0]
+                else:
+                    venue = order['lineItems'][0]['productName'].split('- ')[1].split(',')[0].split()[0]
+
+                if 'Summer' in fileName or 'Easter' in fileName:
+                    day = order['lineItems'][0]['variantOptions'][0]['value'].split(',')[0].split()[1].split('-')[0]
+                    month = order['lineItems'][0]['variantOptions'][0]['value'].split(',')[0].split()[0][0:3]
+                    startDate = datetime.strptime(order['lineItems'][0]['variantOptions'][0]['value'].split(',')[0].split()[1].split('-')[0] + ' ' + order['lineItems'][0]['variantOptions'][0]['value'].split(',')[0].split()[0], '%d %B')
+                    numClasses = 5
+                    sheetName = venue.capitalize() + '_' + day + '_' + month + '_' + time
+                elif 'Autumn' in fileName:
+                    day = order['lineItems'][0]['variantOptions'][0]['value'][0:3]
+                    startDate = ''
+                    numClasses = 12
+                    sheetName = day + '_' + venue.capitalize() + '_' + time
+                elif 'Spring' in fileName:
+                    day = order['lineItems'][0]['variantOptions'][0]['value'][0:3]
+                    startDate = ''
+                    numClasses = 18
+                    sheetName = day + '_' + venue.capitalize() + '_' + time
+
+                for i in range(0, numClasses):
+                    classDates.append((startDate + timedelta(days=i)).strftime('%d %B'))
+
+                if sheetName not in book.sheetnames:
+                    writer = pd.ExcelWriter(fileName, engine='openpyxl')
+                    writer.book = book
+
+                    dataGapSize = 40
+
+                    classListTemplateLines = [
+                                              ['Attendence'],
+                                              [''],
+                                              ['Total No. Of Students'],
+                                              [''],
+                                              ['Date'],
+                                              ['Student Name', 'Tutor'],
+                                              ['Week ' + str(classNum + 1) for classNum in range(numClasses)],
+                                              [' ' for gap in range(dataGapSize - 1)],
+                                              ['Gender',
+                                               'Order ID',
+                                               'Email',
+                                               'Billing Name',
+                                               'Phone',
+                                               'Student Name(s)',
+                                               'Student Date(s) of Birth',
+                                               'Student\'s School and Class',
+                                               'Are you a returning Academy of Code student?',
+                                               'If you are a returning student, when was your last term with AoC?',
+                                               'Additional support for your child',
+                                               'Photography Consent',
+                                               'Other Details',
+                                               'Other Teacher Notes']
+                                              ]
+
+                    classListTemplateLines[5] = classListTemplateLines[5] + classListTemplateLines[6] + classListTemplateLines[7] + classListTemplateLines[8]
+
+                    for i in range(0,3):
+                        del classListTemplateLines[6]
+
+                    classListTemplateLines[4] = classListTemplateLines[4]+ [''] + classDates
+
+                    templateDataFrame = pd.DataFrame(data=classListTemplateLines)
+                    templateDataFrame.to_excel(writer, sheet_name=sheetName, header=False, index=False)
+
+                    writer.save()
+
                 if len(order['lineItems'][0]['customizations'][0]['value'].split()) == 1 and len(order['lineItems'][0]['customizations'][1]['value'].split()) == 1:
                     if len(order['lineItems'][0]['customizations'][2]['value'].split()) == 1:
                         d = [[order['lineItems'][0]['customizations'][0]['value'] + ' ' +
@@ -319,7 +436,9 @@ def CreateAndAppendClassLists(orderList, classListName):
                               order['billingAddress']['firstName'] + ' ' +
                               order['billingAddress']['lastName'],
                               order['billingAddress']['phone'],
-                              order['lineItems'][0]['customizations'][0]['value'],
+                              order['lineItems'][0]['customizations'][0]['value'] + ' ' +
+                              order['lineItems'][0]['customizations'][1]['value'] + ' ' +
+                              order['lineItems'][0]['customizations'][2]['value'],
                               order['lineItems'][0]['customizations'][3]['value'],
                               order['lineItems'][0]['customizations'][6]['value'],
                               order['lineItems'][0]['customizations'][7]['value'],
@@ -336,7 +455,8 @@ def CreateAndAppendClassLists(orderList, classListName):
                               order['billingAddress']['firstName'] + ' ' +
                               order['billingAddress']['lastName'],
                               order['billingAddress']['phone'],
-                              order['lineItems'][0]['customizations'][0]['value'],
+                              order['lineItems'][0]['customizations'][0]['value'] + ' ' +
+                              order['lineItems'][0]['customizations'][1]['value'],
                               order['lineItems'][0]['customizations'][3]['value'],
                               order['lineItems'][0]['customizations'][6]['value'],
                               order['lineItems'][0]['customizations'][7]['value'],
@@ -355,7 +475,9 @@ def CreateAndAppendClassLists(orderList, classListName):
                               order['billingAddress']['firstName'] + ' ' +
                               order['billingAddress']['lastName'],
                               order['billingAddress']['phone'],
-                              order['lineItems'][0]['customizations'][0]['value'],
+                              order['lineItems'][0]['customizations'][0]['value'] + ' ' +
+                              order['lineItems'][0]['customizations'][1]['value'] + ' ' +
+                              order['lineItems'][0]['customizations'][2]['value'],
                               order['lineItems'][0]['customizations'][3]['value'],
                               order['lineItems'][0]['customizations'][6]['value'],
                               order['lineItems'][0]['customizations'][7]['value'],
@@ -372,7 +494,8 @@ def CreateAndAppendClassLists(orderList, classListName):
                               order['billingAddress']['firstName'] + ' ' +
                               order['billingAddress']['lastName'],
                               order['billingAddress']['phone'],
-                              order['lineItems'][0]['customizations'][0]['value'],
+                              order['lineItems'][0]['customizations'][0]['value'] + ' ' +
+                              order['lineItems'][0]['customizations'][2]['value'],
                               order['lineItems'][0]['customizations'][3]['value'],
                               order['lineItems'][0]['customizations'][6]['value'],
                               order['lineItems'][0]['customizations'][7]['value'],
@@ -398,95 +521,74 @@ def CreateAndAppendClassLists(orderList, classListName):
                           '']
                          ]
 
-                for k in range(numClasses+27):
+                book.save(fileName)
+
+                book = load_workbook(fileName)
+
+                maxCol = book.get_sheet_by_name(sheetName).max_column
+
+                for k in range(maxCol-len(d[0])-1):
                     d[0].insert(1, '')
 
                 orderDataFrame = pd.DataFrame(data=d)
 
-                if 'st.' in order['lineItems'][0]['productName'].split('- ')[1].replace(' ', '').split(',')[0].lower():
-                    if '\'' in order['lineItems'][0]['productName'].split('- ')[1].replace(' ', '').split(',')[0].lower():
-                        venue = order['lineItems'][0]['productName'].split('- ')[1].replace(' ', '').split(',')[0].lower().split('st.')[1].split('\'')[0]
-                    else:
-                        venue = order['lineItems'][0]['productName'].split('- ')[1].replace(' ', '').split(',')[0].lower().split('st.')[1][0:4]
-                elif 'the' in order['lineItems'][0]['productName'].split('- ')[1].replace(' ', '').split(',')[0].lower():
-                    venue = order['lineItems'][0]['productName'].split('- ')[1].replace(' ', '').split(',')[0].lower().split('the')[1][0:4]
-                else:
-                    venue = order['lineItems'][0]['productName'].split('- ')[1].replace(' ', '').split(',')[0][0:4].lower()
-                day = order['lineItems'][0]['variantOptions'][0]['value'][0:3]
-                time = order['lineItems'][0]['variantOptions'][0]['value'].split(',')[1].replace(' ','')[0:5].replace(':','_')
-
-                sheetName = day + '_' + venue.capitalize() + '_' + time
-
-                if sheetName not in book.sheetnames:
-                    writer = pd.ExcelWriter(fileName, engine='openpyxl')
-                    writer.book = book
-
-                    templateDataFrame = pd.DataFrame(data=classListTemplateLines)
-                    templateDataFrame.to_excel(writer, sheet_name=sheetName, header=False, index=False)
-
-                    sheet = book[sheetName]
-                    cell = sheet['A1']
-                    cell.font = Font(bold=True)
-
-                    for col in range(1, sheet.max_column+1):
-                        colLetter = get_column_letter(col)
-                        cell = sheet[colLetter+'2']
-                        cell.font = Font(bold=True)
-                    writer.save()
-
                 AppendDfToExcel(fileName, orderDataFrame, sheetName, book)
 
-            book = load_workbook(fileName)
+                totalStudentsCell = book[sheetName].cell(row=3, column=2)
+                totalStudentsCell.value = book[sheetName].max_row - 6
 
-            SortWorkSheets(book)
+                for i in range(1, len(classDates) + 2):
+                    attendanceCell = book[sheetName].cell(row=1, column=i)
+                    if i > 1:
+                        attendanceCell.value = '=COUNTIF(' + get_column_letter(i) + '7:' + get_column_letter(i) + str(book[sheetName].max_row) + ',"Y")'
+                    attendanceCell.fill = fills.PatternFill(patternType='solid', fgColor=Color(rgb='00FFF2CC'))
 
-            row = 2
-            totalStudents = 0
+                for row in range(1, 7):
+                    for col in range(1, book[sheetName].max_column + 1):
+                        colLetter = get_column_letter(col)
+                        cell = book[sheetName][colLetter + str(row)]
+                        cell.font = Font(bold=True)
 
-            for worksheet in book.worksheets:
-                currentCell = book.get_sheet_by_name('Summary').cell(row=row, column=1)
-                if worksheet.title != 'Summary':
-                    currentCell.value = worksheet.title
-                    currentCell.hyperlink = '#%s!%s' % (worksheet.title, 'A1')
+                classDates = []
 
-                    currentCell = book.get_sheet_by_name('Summary').cell(row=row, column=2)
-                    currentCell.value = worksheet.max_row-2
+                writer.save()
+                book.save(fileName)
 
-                    totalStudents += worksheet.max_row-2
-                    row += 1
+            SortWorkSheets(fileName)
 
-            currentCell = book.get_sheet_by_name('Summary').cell(row=row+1, column=1)
-            currentCell.value = 'Total'
-            currentCell.font = Font(bold=True)
-            currentCell = book.get_sheet_by_name('Summary').cell(row=row+1, column=2)
-            currentCell.value = totalStudents
-            currentCell.font = Font(bold=True)
-
-            book.save(fileName)
-
-def SortWorkSheets(book):
-    dayList = ['Mon','Tue','Wed','Thu','Fri','Sat', 'Sun']
+def SortWorkSheets(fileName):
+    dayList = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
     seperateDayList = []
     newOrder = []
 
-    for day in dayList:
-        sheetList = []
-        for sheet in book.sheetnames:
-            if day == sheet[0:3]:
-                sheetList.append(sheet)
-        if sheetList:
-            seperateDayList.append(sheetList)
+    book = load_workbook(fileName)
 
-    for day in seperateDayList:
-        day.sort()
-    newClassOrderList = [j for i in seperateDayList for j in i]
+    if 'Summer' not in fileName and 'Easter' not in fileName:
+        for day in dayList:
+            sheetList = []
+            for sheet in book.sheetnames:
+                if day == sheet[0:3]:
+                    sheetList.append(sheet)
+            if sheetList:
+                seperateDayList.append(sheetList)
 
-    for sheetName in newClassOrderList:
-        newOrder.append(book.worksheets.index(book.get_sheet_by_name(sheetName)))
+        for day in seperateDayList:
+            day.sort()
+        newClassOrderList = [j for i in seperateDayList for j in i]
 
-    summarySheetIndex = book.worksheets.index(book.get_sheet_by_name('Summary'))
+        for sheetName in newClassOrderList:
+            newOrder.append(book.worksheets.index(book.get_sheet_by_name(sheetName)))
+
+        summarySheetIndex = book.worksheets.index(book.get_sheet_by_name('Summary'))
+    else:
+        book._sheets.sort(key=lambda ws: ws.title)
+        summarySheetIndex = book.worksheets.index(book.get_sheet_by_name('Summary'))
+        newOrder = [i for i in range(len(book.worksheets))]
+        del newOrder[summarySheetIndex]
+
     newOrder.insert(0, summarySheetIndex)
     book._sheets = [book._sheets[i] for i in newOrder]
+    book.save(fileName)
 
 def DeleteOldFileFromGoogleDrive(drive, classListName):
     fileList = drive.ListFile({'q': "'root' in parents and trashed=false"}).GetList()
@@ -509,7 +611,7 @@ def UploadToGoogleDrive(drive, classListName):
             folderId = file['id']
             fileMetaData = {'title': classListName + '.xlsx', "parents": [{"id": folderId, "kind": "drive#childList"}]}
             folder = drive.CreateFile(fileMetaData)
-            folder.SetContentFile(classListName + '.xlsx')  # The contents of the file
+            folder.SetContentFile(classListName + '.xlsx')
             print('Uploading ' + file['title'] + ' from Google Drive.')
             folder.Upload({'convert': True})
             break
@@ -517,19 +619,21 @@ def UploadToGoogleDrive(drive, classListName):
 def main():
     start = time.time()
 
-    ReadLastGenerationDate()
+    testMode = StringToBoolean(args.testMode)
 
-    allOrdersList = ExportAllOrders(startDate, endDate)
-    individualOrdersList, classTypeList, fullYearList = ExportIndividualOrders(allOrdersList)
+    allOrdersList, endDate = ExportAllOrders()
+    individualOrdersList, classTypeList, fullYearList = ExportIndividualOrders(allOrdersList, testMode)
 
     if len(individualOrdersList) > 0:
         drive = GoogleDriveAccess()
         for classType in classTypeList:
             if classType[0] == 'Summer':
                 classListName = 'Summer Camps ' + classType[1]
+            elif classType[0] == 'Easter':
+                classListName = 'Easter Camps ' + classType[1]
             else:
                 if len(classType) > 2 and classType[2] == 'Tech Club':
-                    classListName = classType[2] + classType[0] + ' ' + classType[1]
+                    classListName = classType[2] + ' ' + classType[0] + ' ' + classType[1]
                 else:
                     classListName = 'Evening&Weekends ' + classType[0] + ' ' + classType[1]
 
@@ -537,6 +641,7 @@ def main():
                 classListName = 'Test ' + classListName
 
             DownloadClassListsFromGoogleDrive(drive, classListName)
+
             if len(classType) > 2 and classType[2] == 'Next Term':
                 CreateAndAppendClassLists(fullYearList, classListName)
             else:
@@ -544,7 +649,7 @@ def main():
             DeleteOldFileFromGoogleDrive(drive, classListName)
             UploadToGoogleDrive(drive, classListName)
 
-    WriteLastGenerationDate()
+    WriteLastGenerationDate(endDate)
 
     end = time.time()
 

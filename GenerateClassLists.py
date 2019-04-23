@@ -190,7 +190,7 @@ def ExportIndividualOrders(allOrdersList, testMode):
                     for variantOption in responseJSON['lineItems'][0]['variantOptions']:
                         if 'Payment Plan' in variantOption['optionName']:
                             if '30 Weeks' in variantOption['value']:
-                                classType = ('Spring', str(int(responseJSON['lineItems'][0]['productName'].split()[1]) + 1), 'Next Term')
+                                classType = (responseJSON['lineItems'][0]['productName'].split()[0], str(int(responseJSON['lineItems'][0]['productName'].split()[1]) + 1), 'Next Term')
                                 fullYearList.append(responseJSON)
                                 break
 
@@ -211,7 +211,7 @@ def ExportIndividualOrders(allOrdersList, testMode):
                 for variantOption in responseJSON['lineItems'][0]['variantOptions']:
                     if 'Payment Plan' in variantOption['optionName']:
                         if '30 Weeks' in variantOption['value']:
-                            classType = ('Spring', str(int(responseJSON['lineItems'][0]['productName'].split()[1]) + 1), 'Next Term')
+                            classType = (responseJSON['lineItems'][0]['productName'].split()[0], str(int(responseJSON['lineItems'][0]['productName'].split()[1]) + 1), 'Next Term')
                             fullYearList.append(responseJSON)
                             break
 
@@ -297,7 +297,7 @@ def AppendDfToExcel(fileName, df, sheetName, book, startRow=None, truncateSheet=
 
     writer.save()
 
-def CreateAndAppendClassLists(orderList, classListName):
+def CreateAndAppendClassLists(seperateCampOrderList, classListName):
     print('Sorting Class Lists')
 
     for fileName in os.listdir(os.path.dirname(os.path.abspath(__file__))):
@@ -308,7 +308,7 @@ def CreateAndAppendClassLists(orderList, classListName):
 
             seperatedNameOrderList = []
 
-            for order in orderList:
+            for order in seperateCampOrderList:
                 if len(order['lineItems'][0]['customizations'][0]['value'].split()) > 1 and len(
                         order['lineItems'][0]['customizations'][1]['value'].split()) > 1 and len(
                     order['lineItems'][0]['customizations'][2]['value'].split()) == 0:
@@ -361,24 +361,26 @@ def CreateAndAppendClassLists(orderList, classListName):
                 if 'Tech Club' in fileName:
                     venue = order['lineItems'][0]['productName'].split('- ')[2].split(',')[0].split()[0]
                 else:
-                    venue = order['lineItems'][0]['productName'].split('- ')[1].split(',')[0].split()[0]
-
+                    if 'Synge' in order['lineItems'][0]['productName']:
+                        venue = order['lineItems'][0]['productName'].split('- ')[1].split(',')[0].replace(' ','')
+                    else:
+                        venue = order['lineItems'][0]['productName'].split('- ')[1].split(',')[0].split()[0]
                 if 'Summer' in fileName or 'Easter' in fileName:
                     day = order['lineItems'][0]['variantOptions'][0]['value'].split(',')[0].split()[1].split('-')[0]
                     month = order['lineItems'][0]['variantOptions'][0]['value'].split(',')[0].split()[0][0:3]
                     startDate = datetime.strptime(order['lineItems'][0]['variantOptions'][0]['value'].split(',')[0].split()[1].split('-')[0] + ' ' + order['lineItems'][0]['variantOptions'][0]['value'].split(',')[0].split()[0], '%d %B')
                     numClasses = 5
-                    sheetName = venue.capitalize() + '_' + day + '_' + month + '_' + time
+                    sheetName = venue + '_' + day + '_' + month + '_' + time
                 elif 'Autumn' in fileName:
                     day = order['lineItems'][0]['variantOptions'][0]['value'][0:3]
                     startDate = ''
                     numClasses = 12
-                    sheetName = day + '_' + venue.capitalize() + '_' + time
+                    sheetName = day + '_' + venue + '_' + time
                 elif 'Spring' in fileName:
                     day = order['lineItems'][0]['variantOptions'][0]['value'][0:3]
                     startDate = ''
                     numClasses = 18
-                    sheetName = day + '_' + venue.capitalize() + '_' + time
+                    sheetName = day + '_' + venue + '_' + time
 
                 for i in range(0, numClasses):
                     classDates.append((startDate + timedelta(days=i)).strftime('%d %B'))
@@ -537,9 +539,9 @@ def CreateAndAppendClassLists(orderList, classListName):
                 totalStudentsCell = book[sheetName].cell(row=3, column=2)
                 totalStudentsCell.value = book[sheetName].max_row - 6
 
-                for i in range(1, len(classDates) + 2):
+                for i in range(1, len(classDates) + 3):
                     attendanceCell = book[sheetName].cell(row=1, column=i)
-                    if i > 1:
+                    if i > 2:
                         attendanceCell.value = '=COUNTIF(' + get_column_letter(i) + '7:' + get_column_letter(i) + str(book[sheetName].max_row) + ',"Y")'
                     attendanceCell.fill = fills.PatternFill(patternType='solid', fgColor=Color(rgb='00FFF2CC'))
 
@@ -590,6 +592,23 @@ def SortWorkSheets(fileName):
     book._sheets = [book._sheets[i] for i in newOrder]
     book.save(fileName)
 
+def SplitOrderList(orderList):
+    classTermList = []
+    splitOrderList = []
+
+    for order in orderList:
+        if order['lineItems'][0]['productName'].split()[0] not in classTermList:
+            classTermList.append(order['lineItems'][0]['productName'].split()[0])
+
+    for classTerm in classTermList:
+        termOrderList = []
+        for order in orderList:
+            if classTerm in order['lineItems'][0]['productName'].split()[0]:
+                termOrderList.append(order)
+        splitOrderList.append(termOrderList)
+
+    return splitOrderList
+
 def DeleteOldFileFromGoogleDrive(drive, classListName):
     fileList = drive.ListFile({'q': "'root' in parents and trashed=false"}).GetList()
 
@@ -612,7 +631,7 @@ def UploadToGoogleDrive(drive, classListName):
             fileMetaData = {'title': classListName + '.xlsx', "parents": [{"id": folderId, "kind": "drive#childList"}]}
             folder = drive.CreateFile(fileMetaData)
             folder.SetContentFile(classListName + '.xlsx')
-            print('Uploading ' + file['title'] + ' from Google Drive.')
+            print('Uploading ' + file['title'] + ' to Google Drive.')
             folder.Upload({'convert': True})
             break
 
@@ -623,6 +642,9 @@ def main():
 
     allOrdersList, endDate = ExportAllOrders()
     individualOrdersList, classTypeList, fullYearList = ExportIndividualOrders(allOrdersList, testMode)
+    seperateCampList = SplitOrderList(individualOrdersList)
+
+    campIndex = 0
 
     if len(individualOrdersList) > 0:
         drive = GoogleDriveAccess()
@@ -645,9 +667,10 @@ def main():
             if len(classType) > 2 and classType[2] == 'Next Term':
                 CreateAndAppendClassLists(fullYearList, classListName)
             else:
-                CreateAndAppendClassLists(individualOrdersList, classListName)
-            DeleteOldFileFromGoogleDrive(drive, classListName)
-            UploadToGoogleDrive(drive, classListName)
+                CreateAndAppendClassLists(seperateCampList[campIndex], classListName)
+                campIndex += 1
+            #DeleteOldFileFromGoogleDrive(drive, classListName)
+            #UploadToGoogleDrive(drive, classListName)
 
     WriteLastGenerationDate(endDate)
 
